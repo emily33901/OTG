@@ -3,9 +3,10 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using System.Web;
+using System.Web.Handlers;
 using System.IO;
 using System.Net;
+using LibGit2Sharp;
 
 namespace OTG
 {
@@ -93,7 +94,7 @@ namespace OTG
             return output;
         }
 
-        static List<FileData> ExtractFileData(string input)
+        static List<FileData> ExtractFileData(string input, string manifest)
         {
             List<FileData> output = new List<FileData>();
 
@@ -122,7 +123,7 @@ namespace OTG
 
                     current_position = input.IndexOf("</td>", image_end);
 
-                    if (image.Contains("text.gif") == false) continue;
+                    if (image.Contains("text.gif") == false && image.Contains("binary.gif") == false && image.Contains("unknown.gif") == false) continue;
 
                 }
 
@@ -137,7 +138,7 @@ namespace OTG
 
                     new_data.name = input.Substring(manifest_begin, manifest_end - manifest_begin);
 
-                    new_data.url = "http://osw.didrole.com/src/" + new_data.name;
+                    new_data.url = "http://osw.didrole.com/src/" + manifest + "/" + new_data.name;
 
                     current_position = input.IndexOf("</td>", current_position);
                 }
@@ -163,6 +164,7 @@ namespace OTG
 
         static void Main(string[] args)
         {
+            // Get the latest update from the server
             WebClient client = new WebClient();
 
             string website = client.DownloadString("http://osw.didrole.com/src");
@@ -171,24 +173,100 @@ namespace OTG
 
             var data = ExtractData(website);
 
+            UpdateData latest_update = new UpdateData();
+
+            latest_update.date = new DateTime(0);
+
             foreach(var d in data)
             {
-                var file_data = ExtractFileData(client.DownloadString(d.url));
-
-                Console.WriteLine("{0} <{1}> {2}", d.manifest, d.url, d.date.ToShortDateString());
-
-                Console.WriteLine("{");
-
-                foreach (var f in file_data)
-                {
-                    Console.WriteLine("\t{0} <{1}> {2}", f.name, f.url, f.date.ToShortDateString());
-                }
-
-                Console.WriteLine("}");
-                //Console.WriteLine(data);
+                if (d.date > latest_update.date) latest_update = d;
             }
 
-            Console.Read();
+            var file_data = ExtractFileData(client.DownloadString(latest_update.url), latest_update.manifest);
+
+            string header_file = string.Format("{0} <{1}> {2}\n", latest_update.manifest, latest_update.url, latest_update.date.ToShortDateString());
+            header_file += "{\n";
+
+            foreach (var f in file_data)
+            {
+                header_file += string.Format("\t{0} <{1}> {2}\n", f.name, f.url, f.date.ToShortDateString());
+            }
+
+            header_file += "}\n";
+
+            Console.WriteLine(header_file);
+
+            // now push to git
+
+            // get our username + password from the secrets.json file
+            dynamic secrets = new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<dynamic>(File.ReadAllText("secrets.json"));
+
+            string username = secrets["username"];
+            string password = Encoding.UTF8.GetString(Convert.FromBase64String(secrets["password"]));
+
+            // check the manifest that is already there
+            try
+            {
+                string old_manifest = File.ReadAllText("AutoOSW/manifest.txt");
+
+                // this is already up to date we dont need to do anything
+                if (old_manifest == latest_update.manifest + "\n") return;
+            } catch(Exception e)
+            {
+                // repo wasnt initialised properly before... this is fine
+            }
+
+
+            // clone the repo to make sure we have it
+            const string repo_url = "https://github.com/josh33901/AutoOSW.git";
+
+            try
+            {
+                Directory.Move("AutoOSW/", "AutoOSWOld/");
+                var d = new DirectoryInfo("AutoOSWOld/");
+                foreach (var file in d.GetFiles("*", SearchOption.AllDirectories))
+                    file.Attributes &= ~FileAttributes.ReadOnly;
+
+                Directory.Delete("AutoOSWOld/", true);
+            } catch(Exception e)
+            {
+                Console.WriteLine("{0}", e.Message);
+            }
+
+            string git_path = Repository.Clone(repo_url, "AutoOSW/");
+
+            // download all the files into this directory
+            foreach(var f in file_data)
+            {
+                client.DownloadFile(f.url, "AutoOSW/" + f.name);
+            }
+
+            File.WriteAllText("AutoOSW/manifest.txt", latest_update.manifest + "\n");
+
+            // now that we have all the files git add them
+
+            using (var repo = new Repository("AutoOSW/"))
+            {
+                Commands.Stage(repo, "*");
+
+                // Create the committer's signature and commit
+                Signature author = new Signature("josh33901", "@josh33901", DateTime.Now);
+                Signature committer = author;
+
+                string commit_message = "Update for manifest " + latest_update.manifest + " @ " + latest_update.date.ToShortDateString();
+
+                // Commit to the repository
+                Commit commit = repo.Commit(commit_message, author, committer);
+
+                Remote remote = repo.Network.Remotes["origin"];
+                var options = new PushOptions
+                {
+                    CredentialsProvider = (_url, _user, _cred) =>
+                        new UsernamePasswordCredentials { Username = username, Password = password }
+                };
+                repo.Network.Push(remote, @"refs/heads/master", options);
+            }
+
         }
     }
 }
