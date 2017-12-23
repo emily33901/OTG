@@ -7,6 +7,7 @@ using System.Web.Handlers;
 using System.IO;
 using System.Net;
 using LibGit2Sharp;
+using System.Timers;
 
 namespace OTG
 {
@@ -24,8 +25,11 @@ namespace OTG
         public DateTime date;
     }
 
+
     class Program
     {
+        static Timer t;
+
         static List<UpdateData> ExtractData(string input)
         {
             List<UpdateData> output = new List<UpdateData>();
@@ -162,8 +166,10 @@ namespace OTG
             return output;
         }
 
-        static void Main(string[] args)
+        private static void RunUpdate()
         {
+            Console.WriteLine("Beginning Update...");
+
             // Get the latest update from the server
             WebClient client = new WebClient();
 
@@ -177,7 +183,7 @@ namespace OTG
 
             latest_update.date = new DateTime(0);
 
-            foreach(var d in data)
+            foreach (var d in data)
             {
                 if (d.date > latest_update.date) latest_update = d;
             }
@@ -185,14 +191,6 @@ namespace OTG
             var file_data = ExtractFileData(client.DownloadString(latest_update.url), latest_update.manifest);
 
             string header_file = string.Format("{0} <{1}> {2}\n", latest_update.manifest, latest_update.url, latest_update.date.ToShortDateString());
-            header_file += "{\n";
-
-            foreach (var f in file_data)
-            {
-                header_file += string.Format("\t{0} <{1}> {2}\n", f.name, f.url, f.date.ToShortDateString());
-            }
-
-            header_file += "}\n";
 
             Console.WriteLine(header_file);
 
@@ -210,16 +208,24 @@ namespace OTG
                 string old_manifest = File.ReadAllText("AutoOSW/manifest.txt");
 
                 // this is already up to date we dont need to do anything
-                if (old_manifest == latest_update.manifest + "\n") return;
-            } catch(Exception e)
+                if (old_manifest == latest_update.manifest + "\n")
+                {
+                    Console.WriteLine("Up to date... No action taken.");
+                    return;
+                }
+            }
+            catch (Exception)
             {
+                Console.WriteLine("No existing repo detected...");
                 // repo wasnt initialised properly before... this is fine
             }
 
+            Console.WriteLine("Prepare for clone...");
 
             // clone the repo to make sure we have it
             const string repo_url = "https://github.com/josh33901/AutoOSW.git";
 
+            Console.WriteLine("Removing old repo...");
             try
             {
                 Directory.Move("AutoOSW/", "AutoOSWOld/");
@@ -228,35 +234,61 @@ namespace OTG
                     file.Attributes &= ~FileAttributes.ReadOnly;
 
                 Directory.Delete("AutoOSWOld/", true);
-            } catch(Exception e)
+
+            }
+            catch (Exception e)
             {
                 Console.WriteLine("{0}", e.Message);
             }
+            Console.WriteLine("Done.");
+
+            Console.WriteLine("Cloning original repo...");
 
             string git_path = Repository.Clone(repo_url, "AutoOSW/");
 
+            Console.WriteLine("Done.");
+
+            Console.WriteLine("Downloading files from source...");
             // download all the files into this directory
-            foreach(var f in file_data)
+            foreach (var f in file_data)
             {
+                Console.WriteLine("({0} <{1}>)", f.name, f.url);
                 client.DownloadFile(f.url, "AutoOSW/" + f.name);
             }
+            Console.WriteLine("Done.");
 
+            Console.WriteLine("Writing manifest file...");
             File.WriteAllText("AutoOSW/manifest.txt", latest_update.manifest + "\n");
 
             // now that we have all the files git add them
 
             using (var repo = new Repository("AutoOSW/"))
             {
+                Console.WriteLine("Staging repo...");
                 Commands.Stage(repo, "*");
+                Console.WriteLine("Done.");
 
                 // Create the committer's signature and commit
-                Signature author = new Signature("josh33901", "@josh33901", DateTime.Now);
+                Console.WriteLine("Commiting to repo...");
+                Signature author = new Signature("josh33901", "josh33901@gmail.com", DateTime.Now);
                 Signature committer = author;
 
                 string commit_message = "Update for manifest " + latest_update.manifest + " @ " + latest_update.date.ToShortDateString();
 
                 // Commit to the repository
-                Commit commit = repo.Commit(commit_message, author, committer);
+                try
+                {
+                    Commit commit = repo.Commit(commit_message, author, committer);
+
+                }
+                catch (EmptyCommitException)
+                {
+                    Console.WriteLine("No changes detected... Not committing.");
+                    return;
+                }
+                Console.WriteLine("Done.");
+
+                Console.WriteLine("Pushing to origin/master");
 
                 Remote remote = repo.Network.Remotes["origin"];
                 var options = new PushOptions
@@ -265,8 +297,35 @@ namespace OTG
                         new UsernamePasswordCredentials { Username = username, Password = password }
                 };
                 repo.Network.Push(remote, @"refs/heads/master", options);
-            }
+                Console.WriteLine("Done.");
 
+                Console.WriteLine("Action Finished.");
+            }
+        }
+
+        private static void OnTimedEvent(object source, ElapsedEventArgs e)
+        {
+            RunUpdate();
+        }
+
+        static void Main(string[] args)
+        {
+            if(args.Contains("-timedevent"))
+            {
+                // tick every 24 hours
+                t = new Timer(1000 * 60 * 60 * 24);
+
+                t.Elapsed += OnTimedEvent;
+                t.Enabled = true;
+
+                GC.KeepAlive(t);
+
+                Console.ReadLine();
+            }
+            else
+            {
+                RunUpdate();
+            }
         }
     }
 }
